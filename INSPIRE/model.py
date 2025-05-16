@@ -516,3 +516,259 @@ class Model_LGCN():
 
         return adata_full, basis_df
 
+
+
+class Model_GAT_withCS2discriminators():
+    # This is a variant of the INSPIRE model. In the original version, INSPIRE employs S-1 discriminators for S sections.
+    # In contrast, this variant uses C_S^2 pairwise discriminators.
+    def __init__(self,
+                 adata_st_list, # list of spatial transcriptomics anndata objects after "preprocess" and "build_graph" steps
+                 n_spatial_factors, # number of spatial factors in biologically interpretable dimension reduction
+                 n_training_steps, # number of training steps
+                 hidden_dims=[512,32], # dimensionalities of hidden layers in "IntegrationNet"
+                 coef_recon=1.0, # coefficient of reconstruction loss
+                 coef_geom=0.02, # coefficient of geometry loss
+                 use_margin=True, # whether use the margin design in discriminators
+                 margin_warmup_step=100, # margin will be activated after #margin_warmup_step steps
+                 lr_d=5e-4, # learning rate for training "DiscriminatorNet"
+                 seed=1234, # random seed
+                ):
+
+        # set hyperparameters
+        self.n_slices = len(adata_st_list)
+        self.n_heads = 1 # number of attention heads in GAT layers
+        self.n_hidden_d = 512 # dimensionality of hidden layer in "DiscriminatorNet"
+        self.slice_emb_dim = 4 # dimensionality of embedding space encoding slice labels
+        self.lr = 5e-4 # learning rate for training "IntegrationNet"
+        self.weight_decay = 1e-4 # weight decay for training "IntegrationNet"
+        self.weight_decay_d = 1e-4 # weight decay for training "DiscriminatorNet"
+        self.step_interval = 500 # interval of steps for showing objective values
+
+        self.coef_fe = 1.0 # coefficient of auto-encoder loss for features
+        self.coef_beta = 1.0 # coefficient of topic proportion penalty (Dirichlet distribution prior)
+        self.coef_gan = 1.0 # coefficient of GAN loss
+
+        self.n_spatial_factors = n_spatial_factors
+        self.n_training_steps = n_training_steps
+        self.hidden_dims = [adata_st_list[0].shape[1]] + hidden_dims
+        self.coef_recon = coef_recon
+        self.coef_geom = coef_geom
+        self.use_margin = use_margin
+        self.lr_d = lr_d
+        self.seed = seed
+
+        self.margin_warmup_step = margin_warmup_step
+        self.margin = 5.0
+        if self.use_margin != True:
+            self.margin = 50.0
+
+        self.n_spot = 0
+        for i in range(self.n_slices):
+            self.n_spot = self.n_spot + adata_st_list[i].shape[0]
+
+        # record hvg names
+        self.shared_hvgs = adata_st_list[0].var.index
+
+        # set device and random seed
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+        torch.backends.cudnn.benchmark = True
+
+        # setup data
+        self.node_feats_dict = {}
+        self.adj_matrix_dict = {}
+        self.count_matrix_dict = {}
+        self.library_size_dict = {}
+        self.slice_label_dict = {}
+        self.graph_cos_dict = {}
+        for i in range(self.n_slices):
+            if scipy.sparse.issparse(adata_st_list[i].X):
+                self.node_feats_dict[i] = torch.from_numpy(adata_st_list[i].X.toarray()).float().to(self.device)
+            else:
+                self.node_feats_dict[i] = torch.from_numpy(adata_st_list[i].X).float().to(self.device)
+            self.adj_matrix_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obsm["graph"])).float().to(self.device)
+            self.count_matrix_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obsm["count"])).float().to(self.device)
+            self.library_size_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obs["library_size"].values.reshape(-1, 1))).float().to(self.device)
+            self.slice_label_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obs["slice"].values)).long().to(self.device)
+            self.graph_cos_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obsm["graph_cos"])).float().to(self.device)
+
+        # setup networks and optimizers
+        self.net = IntegrationNet_GAT(hidden_dims=self.hidden_dims,
+                                      n_heads=self.n_heads,
+                                      n_factors=self.n_spatial_factors,
+                                      n_slices=self.n_slices,
+                                      slice_emb_dim=self.slice_emb_dim
+                                     ).to(self.device)
+        self.optimizer_net = optim.Adamax(list(self.net.parameters()), lr=self.lr, weight_decay=self.weight_decay)
+
+        self.n_discriminator = int(self.n_slices * (self.n_slices-1) / 2)
+        self.discriminator = {}
+        d_params = []
+        for i in range(self.n_discriminator):
+            self.discriminator[i] = DiscriminatorNet(n_input=self.hidden_dims[2], 
+                                                     n_hidden=self.n_hidden_d
+                                                    ).to(self.device)
+            d_params = d_params + list(self.discriminator[i].parameters())
+        self.optimizer_d = optim.Adam(d_params, lr=self.lr_d, weight_decay=self.weight_decay_d)
+
+
+    def train(self, record_final_loss=False):
+        self.net.train()
+        for i in range(self.n_slices-1):
+            self.discriminator[i].train()
+
+        # steps to record loss
+        step_list = [self.n_training_steps-1, self.n_training_steps-51, self.n_training_steps-101, self.n_training_steps-151, 
+                     self.n_training_steps-201, self.n_training_steps-301, self.n_training_steps-401]
+
+        for step in tqdm(range(self.n_training_steps)):
+            # outputs from networks
+            Zs, betas, alphas, node_feats_recons, basis_val, gammas = self.net(self.adj_matrix_dict, self.node_feats_dict, self.slice_label_dict)
+
+            # discriminator loss
+            self.optimizer_d.zero_grad()
+            loss_d = 0.
+            if step <= self.margin_warmup_step:
+                d_i = -1
+                for i in range(self.n_slices):
+                    for j in range(i+1, self.n_slices, 1):
+                        d_i = d_i + 1
+                        # batch [i] as real; batch [j] as fake
+                        loss_d = loss_d + torch.mean(torch.log(1 + torch.exp(-self.discriminator[d_i](Zs[i])))) + torch.mean(torch.log(1 + torch.exp(self.discriminator[d_i](Zs[j]))))
+            else:
+                d_i = -1
+                for i in range(self.n_slices):
+                    for j in range(i+1, self.n_slices, 1):
+                        d_i = d_i + 1
+                        # batch [i] as real; batch [j] as fake
+                        loss_d = loss_d + torch.mean(torch.log(1 + torch.exp(-torch.clamp(self.discriminator[d_i](Zs[i]), -self.margin, self.margin)))) + torch.mean(torch.log(1 + torch.exp(torch.clamp(self.discriminator[d_i](Zs[j]), -self.margin, self.margin))))
+            loss_d = loss_d / self.n_discriminator * (self.n_slices-1)
+            loss_d_opt = self.coef_gan * loss_d
+            loss_d_opt.backward(retain_graph=True)
+            self.optimizer_d.step()
+
+            # auto-encoder loss of node features, reconstruction loss, geometry loss
+            features_loss = 0.
+            recon_loss = 0.
+            geom_loss = 0.
+            log_lam_dict = {}
+            Zs_norm_dict = {}
+            for i in range(self.n_slices):
+                features_loss = features_loss + torch.mean(torch.sqrt(torch.sum(torch.pow(self.node_feats_dict[i]-node_feats_recons[i], 2), axis=1)))
+                log_lam_dict[i] = torch.log(torch.matmul(betas[i], basis_val) + 1e-6) + gammas[self.slice_label_dict[i]]
+                recon_loss = recon_loss - torch.mean(torch.sum(self.count_matrix_dict[i] * 
+                                                         (torch.log(self.library_size_dict[i] + 1e-6) + log_lam_dict[i]) - self.library_size_dict[i] * torch.exp(log_lam_dict[i]), axis=1))
+                Zs_norm_dict[i] = F.normalize(Zs[i], p=2)
+                geom_loss = geom_loss + torch.mean(torch.sum(torch.pow(torch.matmul(Zs_norm_dict[i], torch.transpose(Zs_norm_dict[i],0,1)) - self.graph_cos_dict[i], 2), axis=1))
+
+            # beta loss
+            for i in range(self.n_slices):
+                if i == 0:
+                    p_aver = torch.sum(betas[i], axis=0)
+                else:
+                    p_aver = p_aver + torch.sum(betas[i], axis=0)
+            p_aver = p_aver / self.n_spot
+            prior_val = 5.0
+            beta_loss = - torch.sum((prior_val - 1.) * torch.log(p_aver + 1e-6)) * 1.0
+
+            # gan loss
+            gan_loss = 0.
+            if step <= self.margin_warmup_step:
+                d_i = -1
+                for i in range(self.n_slices):
+                    for j in range(i+1, self.n_slices, 1):
+                        d_i = d_i + 1
+                        gan_loss = gan_loss + torch.mean(torch.log(1 + torch.exp(-self.discriminator[d_i](Zs[j]))))
+            else:
+                d_i = -1
+                for i in range(self.n_slices):
+                    for j in range(i+1, self.n_slices, 1):
+                        d_i = d_i + 1
+                        gan_loss = gan_loss + torch.mean(torch.log(1 + torch.exp(-torch.clamp(self.discriminator[d_i](Zs[j]), -self.margin, self.margin))))
+            gan_loss = gan_loss / self.n_discriminator * (self.n_slices-1)
+
+            # total loss
+            self.optimizer_net.zero_grad()
+            loss_total = self.coef_fe*features_loss + self.coef_recon*recon_loss + self.coef_geom*geom_loss + self.coef_beta*beta_loss + self.coef_gan*gan_loss
+            loss_total.backward()
+            self.optimizer_net.step()
+
+            if not step % self.step_interval:
+                print("Step: %s, d_loss: %.4f, Loss: %.4f, recon_loss: %.4f, fe_loss: %.4f, geom_loss: %.4f, beta_loss: %.4f, gan_loss: %.4f" % (step, loss_d.item(), loss_total.item(), recon_loss.item(), features_loss.item(), geom_loss.item(), beta_loss.item(), gan_loss.item()))
+
+            if record_final_loss == True:
+                if step in step_list:
+                    loss_values = {}
+                    loss_values["step"] = step
+                    loss_values["d_loss"] = loss_d.item()
+                    loss_values["total_loss"] = loss_total.item()
+                    loss_values["recon_loss"] = recon_loss.item()
+                    loss_values["fe_loss"] = features_loss.item()
+                    loss_values["geom_loss"] = gan_loss.item()
+                    loss_values["beta_loss"] = beta_loss.item()
+                    loss_values["gan_loss"] = gan_loss.item()
+                    self.loss_val.append(loss_values)
+
+        if record_final_loss == True:
+            return self.loss_val
+
+
+    def eval(self,
+             adata_full, # full concatenated anndata of all datasets generated by "preprocess" step
+             eval_d_scores=False, # whether evaluate discriminator scores
+             ):
+        self.net.eval()
+        Zs, betas, alphas, node_feats_recons, basis_val, gammas = self.net(self.adj_matrix_dict, self.node_feats_dict, self.slice_label_dict)
+
+        # betas
+        print("Add cell/spot proportions of spatial factors into adata_full.obs...")
+        for i in range(self.n_slices):
+            b = betas[i].detach().cpu().numpy()
+            if i == 0:
+                b_full = b
+            else:
+                b_full = np.concatenate((b_full, b), axis=0)
+        decon_res = pd.DataFrame(b_full, columns=["Proportion of spatial factor "+str(j+1) for j in range(b_full.shape[1])])
+        decon_res.index = adata_full.obs.index
+        adata_full.obs = adata_full.obs.join(decon_res)
+
+        # visualize Zs
+        print("Add cell/spot latent representations into adata_full.obsm['latent']...")
+        for i in range(self.n_slices):
+            Z = Zs[i].detach().cpu().numpy()
+            cell_reps = pd.DataFrame(Z)
+            cell_reps.index = ["slice-"+str(i)+"-cell-"+str(j) for j in range(cell_reps.shape[0])]
+            if i == 0:
+                cell_reps_total = cell_reps
+            else:
+                cell_reps_total = pd.concat([cell_reps_total, cell_reps])
+        adata_full.obsm['latent'] = cell_reps_total.values
+
+        # evaluate discriminator scores
+        if eval_d_scores == True:
+            print("Evaluate discriminator scores...")
+            for i in range(self.n_discriminator):
+                self.discriminator[i].eval()
+
+            d_score_dict = {}
+            d_i = -1
+            for i in range(self.n_slices):
+                for j in range(i+1, self.n_slices, 1):
+                    d_i = d_i + 1
+                    d_score_dict[d_i] = {}
+                    d_score_dict[d_i][0] = self.discriminator[d_i](Zs[i]).detach().cpu().numpy()
+                    d_score_dict[d_i][1] = self.discriminator[d_i](Zs[j]).detach().cpu().numpy()
+
+        # basis
+        basis = basis_val.detach().cpu().numpy()
+        basis_df = pd.DataFrame(basis, columns=self.shared_hvgs)
+
+        if eval_d_scores == True:
+            return adata_full, basis_df, d_score_dict
+        else:
+            return adata_full, basis_df
+
+
