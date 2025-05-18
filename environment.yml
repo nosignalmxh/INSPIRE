@@ -1,4 +1,4 @@
-name: inspire
+name: pkg_test
 channels:
   - conda-forge
   - bioconda
@@ -16,4 +16,4 @@ dependencies:
   - numba=0.58.1
   - matplotlib=3.5.3
   - python-annoy=1.17.2
-  - scikit-misc=0.1.4
+  - scikit-misc
