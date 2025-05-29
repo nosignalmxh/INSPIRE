@@ -4,7 +4,7 @@ library(PRECAST)
 set.seed(1234)
 
 
-# We organized the tissue sections as the format of PRECAST's input. The organized sections are available at:
+# # The data with format required by PRECAST are available at: 
 # https://drive.google.com/file/d/1g763Z7ClovTDn7aQXj4hJs6cxLFjvQAS/view?usp=sharing
 
 
