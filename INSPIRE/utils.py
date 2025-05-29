@@ -510,3 +510,134 @@ def acquire_pairs(X, Y, k=30, metric='angular'):
     return mnn_mat
 
 
+
+def rigid_registration_MNNs(latent_0, # latent representations of cells or spots from section 1
+                            latent_1, # latent representations of cells or spots from section 2
+                            loc0, # spatial coordinates of cells or spots from section 1
+                            loc1, # spatial coordinates of cells or spots from section 2
+                            k=1, # number of MNNs
+                            metric='euclidean', # metric used for computing MNNs
+                            filter_quantile=0.5, # quantile threshold for filtering out MNNs that are not likely to be true pairs
+                           ):
+    ## coarse
+    mnn_mat = acquire_pairs(latent_0, latent_1, k=k, metric=metric)
+    idx_0 = []
+    idx_1 = []
+    for i in range(mnn_mat.shape[0]):
+        if np.sum(mnn_mat[i, :]) > 0:
+            nns = np.where(mnn_mat[i, :] == 1)[0]
+            for j in list(nns):
+                idx_0.append(i)
+                idx_1.append(j)
+    loc0_pair = loc0[idx_0, :]
+    loc1_pair = loc1[idx_1, :]
+    T,_,_ = best_fit_transform(loc0_pair, loc1_pair)
+    loc0_new = transform(loc0, T)
+    loc0 = loc0_new
+
+    ## refine
+    loc0_pair = loc0[idx_0, :]
+    loc1_pair = loc1[idx_1, :]
+    distances = np.sqrt(np.sum((loc0_pair - loc1_pair) ** 2, axis=1))
+    keep_index = (distances < np.quantile(distances, filter_quantile))
+
+    loc0_pair = loc0[np.array(idx_0)[keep_index], :]
+    loc1_pair = loc1[np.array(idx_1)[keep_index], :]
+
+    T,_,_ = best_fit_transform(loc0_pair, loc1_pair)
+    loc0_new = transform(loc0, T)
+    loc0 = loc0_new
+
+    return loc0_new
+
+
+
+def nearest_neighbor(src, dst):
+    '''
+    Find the nearest (Euclidean) neighbor in dst for each point in src
+    Input:
+        src: Nxm array of points
+        dst: Nxm array of points
+    Output:
+        distances: Euclidean distances of the nearest neighbor
+        indices: dst indices of the nearest neighbor
+    '''
+    from sklearn.neighbors import NearestNeighbors
+    neigh = NearestNeighbors(n_neighbors=1)
+    neigh.fit(dst)
+    distances, indices = neigh.kneighbors(src, return_distance=True)
+    return distances.ravel(), indices.ravel()
+
+
+
+def rigid_registration_ICP_landmark_factors(adata_0, # anndata object containing results for section 1
+                                            adata_1, # anndata object containing results for section 2
+                                            loc_0, # spatial coordinates of cells or spots from section 1
+                                            loc_1, # spatial coordinates of cells or spots from section 2
+                                            landmark_factors, # user selected landmark spatial factors
+                                            factor_value_threshold=0.6, # threshold for selecting landmark factor-related cells or spots
+                                            plot=True, # whether to draw plot or not
+                                            spot_size=100, # spot size in plots
+                                           ):
+    ## find anchors for the ICP algorithm
+    obs_names = ["Proportion of "+kf for kf in landmark_factors]
+    adata_0.obs["prop key factor"] = np.sum(np.array(adata_0.obs[obs_names].values), axis=1)
+    adata_1.obs["prop key factor"] = np.sum(np.array(adata_1.obs[obs_names].values), axis=1)
+
+    adata_0.obsm["spatial"] = loc_0
+    adata_1.obsm["spatial"] = loc_1
+
+    adata_0.obs["spatial anchor"] = (np.array(adata_0.obs["prop key factor"].values) > factor_value_threshold).astype(int)
+    adata_1.obs["spatial anchor"] = (np.array(adata_1.obs["prop key factor"].values) > factor_value_threshold).astype(int)
+
+    if plot:
+        sc.pl.spatial(adata_0, color="spatial anchor", spot_size=spot_size)
+        sc.pl.spatial(adata_1, color="spatial anchor", spot_size=spot_size)
+
+    spatial_0 = adata_0[adata_0.obs["spatial anchor"].values == 1].obsm["spatial"]
+    spatial_1 = adata_1[adata_1.obs["spatial anchor"].values == 1].obsm["spatial"]
+
+    ## run ICP
+    A = spatial_0
+    B = spatial_1
+    max_iterations=1000
+    tolerance=0.001
+    m = A.shape[1]
+
+    # make points homogeneous, copy them to maintain the originals
+    src = np.ones((m+1,A.shape[0]))
+    dst = np.ones((m+1,B.shape[0]))
+    src[:m,:] = np.copy(A.T)
+    dst[:m,:] = np.copy(B.T)
+
+    prev_error = 0
+
+    for i in range(max_iterations):
+        # find the nearest neighbors between the current source and destination points
+        from sklearn.neighbors import NearestNeighbors
+        distances, indices = nearest_neighbor(src[:m,:].T, dst[:m,:].T)
+        keep_index = (distances < np.quantile(distances, 0.9))
+        indices_0 = np.where(keep_index)[0]
+        indices_1 = indices[keep_index]
+        
+        # compute the transformation between the current source and nearest destination points
+        T,_,_ = best_fit_transform(src[:m,indices_0].T, dst[:m,indices_1].T)
+        
+        # update the current source
+        src = np.dot(T, src)
+
+        # check error
+        mean_error = np.mean(distances[indices_0])
+        if np.abs(prev_error - mean_error) < tolerance:
+            break
+        prev_error = mean_error
+
+    # calculate final transformation
+    T,_,_ = best_fit_transform(A, src[:m,:].T)
+
+    # apply trans
+    loc0_new = transform(adata_0.obsm["spatial"], T)
+    
+    return loc0_new
+
+
