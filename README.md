@@ -37,7 +37,7 @@ In our manuscript, we demonstrate that INSPIRE is applicable to a range of biolo
 * Integration of multiple ST sections offering complementary views of complex tissue, where spatial structures only partially overlap, to construct a comprehensive spatial atlas.
 * Integration of multiple ST sections from distinct ST technologies, harnessing the unique strengths of each to deepen biological insights.
 * Integration of ST sections under different biological conditions, depicting meaningful biological signals unique to certain conditions.
-* Integration of high-resolution human cancer sections, revealing microenvironment heterogeneity across different tumor subtypes.
+* Integration of high-resolution human cancer sections, revealing microenvironment heterogeneity across distinct tumor subtypes.
 * Integration of multiple whole-embryo ST sections collected across various developmental stages to unravel complex dynamic changes during embryonic development.
 * Integration of multiple adjacent ST sections along an axis to reconstruct 3D structures of organs or entire organisms, offering deeper insights beyond traditional 2D analyses.
 
