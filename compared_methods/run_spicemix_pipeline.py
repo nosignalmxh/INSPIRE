@@ -10,6 +10,10 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 
 
+# The data with format required by SpiceMix are available at: 
+# https://drive.google.com/drive/folders/1ou0QM9hBZYjQlF-dPuywaHt7a-3u7gcp?usp=sharing
+
+
 # -- specify device
 context = dict(device='cuda:0', dtype=torch.float64)
 
