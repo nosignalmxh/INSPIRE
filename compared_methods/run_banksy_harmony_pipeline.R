@@ -1,4 +1,3 @@
-# mc, env: banksy_r
 rm(list = ls())
 library(Banksy)
 library(SummarizedExperiment)
@@ -8,6 +7,10 @@ library(Seurat)
 library(scater)
 library(cowplot)
 library(ggplot2)
+
+
+# The data with format required by SpatialGlue are available from the spatialLIBD package.
+
 
 SEED <- 1234
 

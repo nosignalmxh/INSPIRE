@@ -8,6 +8,12 @@ library(Seurat)
 
 set.seed(1234)
 
+
+# The data with format required by BayesSpace are available at: 
+# https://drive.google.com/drive/folders/1NVROB3oyBgBEzCt1yH_AJe6uSIjspDLf?usp=sharing, and
+# https://drive.google.com/drive/folders/1qJiZUYhTCVlpYXwFa6xE9JsCnZn8qrMP?usp=sharing
+
+
 cluster_df <- read.table(file = 'spatialLIBD/barcode_level_layer_map.tsv', sep='\t', col.name=c("barcode", "slice", "layer"))
 
 section_list <- c("151673", "151674", "151675", "151676")

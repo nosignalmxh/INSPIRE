@@ -9,7 +9,7 @@ import umap
 from mofapy2.run.entry_point import entry_point
 
 
-# # The data with format required by MEFISTO are available at: 
+# The data with format required by MEFISTO are available at: 
 # https://drive.google.com/file/d/1dT7bB6JSMr_OAhrFMV2_ABuGWa_uudti/view?usp=sharing
 
 

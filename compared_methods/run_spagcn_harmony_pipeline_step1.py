@@ -14,7 +14,7 @@ import SpaGCN as spg
 import cv2
 
 
-# # The data with format required by SpaGCN are available at: 
+# The data with format required by SpaGCN are available at: 
 # https://drive.google.com/drive/folders/1YJ6LcghneN5nXyBgVcKEeSmfjMImsvNs?usp=sharing
 
 

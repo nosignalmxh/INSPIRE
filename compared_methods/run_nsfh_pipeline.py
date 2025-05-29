@@ -11,7 +11,7 @@ from models import sf, sfh
 from utils import misc,preprocess,training,postprocess,visualize
 
 
-# # The data with format required by NSFH are available at: 
+# The data with format required by NSFH are available at: 
 # https://drive.google.com/file/d/1dT7bB6JSMr_OAhrFMV2_ABuGWa_uudti/view?usp=sharing
 
 

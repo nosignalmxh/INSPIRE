@@ -17,6 +17,10 @@ from paste.helper import to_dense_array
 import anndata
 
 
+# The data with format required by PASTE are available at: 
+# https://drive.google.com/drive/folders/1NVROB3oyBgBEzCt1yH_AJe6uSIjspDLf?usp=sharing
+
+
 data_dir = "spatialLIBD"
 
 slice_idx = 151673

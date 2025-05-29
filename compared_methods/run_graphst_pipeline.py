@@ -15,6 +15,11 @@ import paste as pst
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
+
+# The data with format required by GraphST are available at: 
+# https://drive.google.com/drive/folders/1NVROB3oyBgBEzCt1yH_AJe6uSIjspDLf?usp=sharing
+
+
 data_dir = "spatialLIBD"
 
 slice_idx_list = [151673, 151674, 151675, 151676]

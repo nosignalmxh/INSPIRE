@@ -4,7 +4,7 @@ library(rliger)
 set.seed(1234)
 
 
-# # The data with format required by LIGER are available at: 
+# The data with format required by LIGER are available at: 
 # https://drive.google.com/file/d/1g763Z7ClovTDn7aQXj4hJs6cxLFjvQAS/view?usp=sharing
 
 

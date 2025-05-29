@@ -12,7 +12,7 @@ import STAGATE
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-# # The data with format required by STAGATE are available at: 
+# The data with format required by STAGATE are available at: 
 # https://drive.google.com/file/d/1dT7bB6JSMr_OAhrFMV2_ABuGWa_uudti/view?usp=sharing
 
 data_path = "data_for_R"
