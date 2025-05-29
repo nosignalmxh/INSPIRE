@@ -38,6 +38,8 @@ We provide tutorials and codes for reproducing the experiments of our paper at [
 ## Quick start
 Starting with raw gene expression count matrices and spatial coordinate matrics obtained from multiple tissue sections, each formatted as an individual AnnData object, INSPIRE provides two integration options: one based on graph attention networks (GATs) and the other on lightweight graph convolutional networks (LGCNs). For tissue sections profiled using low-resolution platforms such as Visium or ST, we recommend employing the graph attention network variant of INSPIRE to leverage the attention mechanism for improved modeling accuracy. In contrast, for high-resolution datasets, the lightweight graph convolutional network variant is recommended, as it provides enhanced computational efficiency and scalability for large-scale analyses.
 
+We provide instructions for users to get a quick start, including annotated demos and example data: [Using INSPIRE with graph attention networks (GATs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_GAT.html), [Using INSPIRE with lightweight graph convolutional networks (LGCNs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_LGCN.html).
+
 ## Reference
 
 Jia Zhao, Xiangyu Zhang, Gefei Wang, Yingxin Lin, Tianyu Liu, Rui B. Chang, Hongyu Zhao. INSPIRE: interpretable, flexible and spatially-aware integration of multiple spatial transcriptomics datasets from diverse sources. Preprint. 2024. [https://doi.org/10.1101/2024.09.23.614539](https://doi.org/10.1101/2024.09.23.614539).
