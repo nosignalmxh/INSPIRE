@@ -24,6 +24,12 @@ conda env update --f environment.yml
 conda activate INSPIRE
 ```
 
+## Quick start
+Starting with raw gene expression count matrices and spatial coordinate matrics obtained from multiple tissue sections, each formatted as an individual AnnData object, INSPIRE provides two integration options: one based on graph attention networks (GATs) and the other on lightweight graph convolutional networks (LGCNs). For tissue sections profiled using low-resolution platforms such as Visium or ST, we recommend employing the graph attention network variant of INSPIRE to leverage the attention mechanism for improved modeling accuracy. In contrast, for high-resolution datasets, the lightweight graph convolutional network variant is recommended, as it provides enhanced computational efficiency and scalability for large-scale analyses.
+
+We provide instructions for users to get a quick start, including annotated demos and example data: [Using INSPIRE with graph attention networks (GATs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_GAT.html), [Using INSPIRE with lightweight graph convolutional networks (LGCNs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_LGCN.html).
+
+
 ## Usage and reproducibility
 
 In our manuscript, we demonstrate that INSPIRE is applicable to a range of biologically significant integrative analysis scenarios:
@@ -34,11 +40,6 @@ In our manuscript, we demonstrate that INSPIRE is applicable to a range of biolo
 * Integration of multiple adjacent ST slices along an axis to reconstruct 3D structures of organs or entire organisms, offering deeper insights beyond traditional 2D analyses.
 
 We provide tutorials and codes for reproducing the experiments of our paper at [this tutorial website](https://inspire-tutorial.readthedocs.io/en/latest/index.html#).
-
-## Quick start
-Starting with raw gene expression count matrices and spatial coordinate matrics obtained from multiple tissue sections, each formatted as an individual AnnData object, INSPIRE provides two integration options: one based on graph attention networks (GATs) and the other on lightweight graph convolutional networks (LGCNs). For tissue sections profiled using low-resolution platforms such as Visium or ST, we recommend employing the graph attention network variant of INSPIRE to leverage the attention mechanism for improved modeling accuracy. In contrast, for high-resolution datasets, the lightweight graph convolutional network variant is recommended, as it provides enhanced computational efficiency and scalability for large-scale analyses.
-
-We provide instructions for users to get a quick start, including annotated demos and example data: [Using INSPIRE with graph attention networks (GATs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_GAT.html), [Using INSPIRE with lightweight graph convolutional networks (LGCNs)](https://inspire-tutorial.readthedocs.io/en/latest/examples/INSPIRE_LGCN.html).
 
 ## Reference
 
