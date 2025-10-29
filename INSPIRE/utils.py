@@ -11,6 +11,43 @@ from sklearn.metrics.cluster import normalized_mutual_info_score
 from annoy import AnnoyIndex
 
 
+def _ensure_spatial_obsm(adata, dataset_index):
+    if "spatial" in adata.obsm:
+        return
+
+    candidate_pairs = [
+        ("x", "y"),
+        ("X", "Y"),
+        ("x_coord", "y_coord"),
+        ("x_coordinate", "y_coordinate"),
+        ("X_coord", "Y_coord"),
+        ("X_coordinate", "Y_coordinate"),
+        ("x_centroid", "y_centroid"),
+        ("X_centroid", "Y_centroid"),
+        ("x_global", "y_global"),
+        ("X_global", "Y_global"),
+        ("center_x", "center_y"),
+        ("pxl_col_in_fullres", "pxl_row_in_fullres"),
+        ("aligned_x", "aligned_y"),
+    ]
+
+    for x_key, y_key in candidate_pairs:
+        if x_key in adata.obs.columns and y_key in adata.obs.columns:
+            coords = np.column_stack((adata.obs[x_key].to_numpy(), adata.obs[y_key].to_numpy())).astype(float)
+            adata.obsm["spatial"] = coords
+            print(
+                f"Dataset {dataset_index} is missing obsm['spatial']; "
+                f"constructed spatial coordinates from obs['{x_key}'] and obs['{y_key}']."
+            )
+            return
+
+    raise KeyError(
+        "Dataset {} does not contain spatial coordinates in .obsm['spatial'] and no supported obs columns were found.".format(
+            dataset_index
+        )
+    )
+
+
 def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
                num_hvgs, # number of highly variable genes to be selected for each anndata
                min_genes_qc, # minimum number of genes expressed required for a cell to pass quality control filtering
@@ -43,6 +80,7 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
     hvgs_shared = None
     for i, adata_st in enumerate(adata_st_list):
         # Remove mt-genes
+        _ensure_spatial_obsm(adata_st_list[i], i)
         adata_st_list[i].var_names_make_unique()
         adata_st_list[i] = adata_st_list[i][:, np.array(~adata_st_list[i].var.index.isna())
                                              & np.array(~adata_st_list[i].var_names.str.startswith("mt-"))
