@@ -3,14 +3,8 @@
 
 import argparse
 import os
-import sys
-from pathlib import Path
 
 import scanpy as sc
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from INSPIRE.utils import preprocess, build_graph_LGCN
 from INSPIRE.model import Model_LGCN
@@ -54,25 +48,17 @@ def main() -> None:
     adata_slideseq = sc.read_h5ad(args.data_slideseq)
     adata_merfish = sc.read_h5ad(args.data_merfish)
 
-    try:
-        adata_list, adata_full = preprocess(
-            [adata_slideseq, adata_merfish],
-            num_hvgs=args.num_hvgs,
-            min_genes_qc=args.min_genes_qc,
-            min_cells_qc=args.min_cells_qc,
-            spot_size=args.spot_size,
-            limit_num_genes=not args.use_gene_union,
-            use_gene_union=args.use_gene_union,
-            per_dataset_hvg=args.per_dataset_hvg,
-            concat_mask_to_input=args.concat_mask_to_input,
-        )
-    except TypeError as err:
-        if "use_gene_union" in str(err):
-            raise RuntimeError(
-                "The installed INSPIRE package is outdated. Please run this script from the updated repository "
-                "root or reinstall INSPIRE from source to use the gene-union workflow."
-            ) from err
-        raise
+    adata_list, adata_full = preprocess(
+        [adata_slideseq, adata_merfish],
+        num_hvgs=args.num_hvgs,
+        min_genes_qc=args.min_genes_qc,
+        min_cells_qc=args.min_cells_qc,
+        spot_size=args.spot_size,
+        limit_num_genes=not args.use_gene_union,
+        use_gene_union=args.use_gene_union,
+        per_dataset_hvg=args.per_dataset_hvg,
+        concat_mask_to_input=args.concat_mask_to_input,
+    )
 
     print("Constructing LGCN graphs...")
     rad_cutoff_list = [args.rad_cutoff for _ in adata_list]
