@@ -11,6 +11,43 @@ from sklearn.metrics.cluster import normalized_mutual_info_score
 from annoy import AnnoyIndex
 
 
+def _ensure_spatial_obsm(adata, dataset_index):
+    if "spatial" in adata.obsm:
+        return
+
+    candidate_pairs = [
+        ("x", "y"),
+        ("X", "Y"),
+        ("x_coord", "y_coord"),
+        ("x_coordinate", "y_coordinate"),
+        ("X_coord", "Y_coord"),
+        ("X_coordinate", "Y_coordinate"),
+        ("x_centroid", "y_centroid"),
+        ("X_centroid", "Y_centroid"),
+        ("x_global", "y_global"),
+        ("X_global", "Y_global"),
+        ("center_x", "center_y"),
+        ("pxl_col_in_fullres", "pxl_row_in_fullres"),
+        ("aligned_x", "aligned_y"),
+    ]
+
+    for x_key, y_key in candidate_pairs:
+        if x_key in adata.obs.columns and y_key in adata.obs.columns:
+            coords = np.column_stack((adata.obs[x_key].to_numpy(), adata.obs[y_key].to_numpy())).astype(float)
+            adata.obsm["spatial"] = coords
+            print(
+                f"Dataset {dataset_index} is missing obsm['spatial']; "
+                f"constructed spatial coordinates from obs['{x_key}'] and obs['{y_key}']."
+            )
+            return
+
+    raise KeyError(
+        "Dataset {} does not contain spatial coordinates in .obsm['spatial'] and no supported obs columns were found.".format(
+            dataset_index
+        )
+    )
+
+
 def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
                num_hvgs, # number of highly variable genes to be selected for each anndata
                min_genes_qc, # minimum number of genes expressed required for a cell to pass quality control filtering
@@ -18,6 +55,9 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
                spot_size, # spot size used in "sc.pl.spatial" for visualization spatial data
                min_concat_dist=50, # minimum distance among data used to re-calculating spatial locations for better visualizations
                limit_num_genes=False, # whether datasets to be integrated only have a limited number of shared genes
+               use_gene_union=False, # whether select HVGs per dataset then build union feature space
+               per_dataset_hvg=None, # number of HVGs used for each dataset when constructing union
+               concat_mask_to_input=False, # placeholder flag for downstream graph building
               ):
     ## If limit_num_genes=True, get shared genes from datasets before performing any other preprocessing step.
     # Get shared genes
@@ -36,8 +76,11 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
     
     ## Find shared highly varialbe genes among anndata as features
     print("Finding highly variable genes...")
+    hvgs_each = []
+    hvgs_shared = None
     for i, adata_st in enumerate(adata_st_list):
         # Remove mt-genes
+        _ensure_spatial_obsm(adata_st_list[i], i)
         adata_st_list[i].var_names_make_unique()
         adata_st_list[i] = adata_st_list[i][:, np.array(~adata_st_list[i].var.index.isna())
                                              & np.array(~adata_st_list[i].var_names.str.startswith("mt-"))
@@ -48,12 +91,16 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
         sc.pp.filter_genes(adata_st_list[i], min_cells=min_cells_qc)
         print("shape of adata "+str(i)+" after quality control: ", adata_st_list[i].shape)
         # Find hvgs
-        sc.pp.highly_variable_genes(adata_st_list[i], flavor='seurat_v3', n_top_genes=num_hvgs)
+        n_top = num_hvgs
+        if use_gene_union and per_dataset_hvg is not None:
+            n_top = per_dataset_hvg
+        sc.pp.highly_variable_genes(adata_st_list[i], flavor='seurat_v3', n_top_genes=n_top)
         hvgs = adata_st_list[i].var[adata_st_list[i].var.highly_variable == True].sort_values(by="highly_variable_rank").index
-        if i == 0:
-            hvgs_shared = hvgs
+        hvgs_each.append(hvgs)
+        if hvgs_shared is None:
+            hvgs_shared = set(hvgs)
         else:
-            hvgs_shared = hvgs_shared & hvgs
+            hvgs_shared = hvgs_shared & set(hvgs)
         # Add slice label
         adata_st_list[i].obs['slice'] = i
         adata_st_list[i].obs["slice"] = adata_st_list[i].obs["slice"].values.astype(int)
@@ -61,6 +108,11 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
         adata_st_list[i].obs.index = adata_st_list[i].obs.index + "-" + str(i)
     hvgs_shared = sorted(list(hvgs_shared))
     print("Find", str(len(hvgs_shared)), "shared highly variable genes among datasets.")
+
+    hvgs_union = hvgs_shared
+    if use_gene_union:
+        hvgs_union = sorted(list(set().union(*[set(h) for h in hvgs_each])))
+        print("Find", str(len(hvgs_union)), "genes in the union of dataset-specific HVGs.")
 
     
     ## Concatenate datasets as a full anndata for better visualization
@@ -91,19 +143,53 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
     if limit_num_genes == True:
         target_sum = 1e3
     for i, adata_st in enumerate(adata_st_list):
-        # Store counts and library sizes for Poisson modeling
-        st_mtx = adata_st[:, hvgs_shared].X.copy()
-        if scipy.sparse.issparse(st_mtx):
-            st_mtx = st_mtx.toarray()
-        adata_st_list[i].obsm["count"] = st_mtx
-        st_library_size = np.sum(st_mtx, axis=1)
-        adata_st_list[i].obs["library_size"] = st_library_size
-        # Normalize data
-        sc.pp.normalize_total(adata_st_list[i], target_sum=target_sum)
-        sc.pp.log1p(adata_st_list[i])
-        adata_st_list[i] = adata_st_list[i][:, hvgs_shared]
-        if scipy.sparse.issparse(adata_st_list[i].X):
-            adata_st_list[i].X = adata_st_list[i].X.toarray()
+        if use_gene_union:
+            mask = np.zeros((adata_st.n_obs, len(hvgs_union)), dtype=np.uint8)
+            union_mtx = np.zeros((adata_st.n_obs, len(hvgs_union)), dtype=np.float32)
+            gene_to_union = {g: idx for idx, g in enumerate(hvgs_union)}
+            genes_in_slice = [g for g in hvgs_union if g in adata_st.var_names]
+            if genes_in_slice:
+                slice_idx = [gene_to_union[g] for g in genes_in_slice]
+                tmp_mtx = adata_st[:, genes_in_slice].X.copy()
+                if scipy.sparse.issparse(tmp_mtx):
+                    tmp_mtx = tmp_mtx.toarray()
+                union_mtx[:, slice_idx] = tmp_mtx
+                mask[:, slice_idx] = 1
+
+            shared_idx = [gene_to_union[g] for g in hvgs_shared]
+            shared_mtx = union_mtx[:, shared_idx]
+
+            new_adata = ad.AnnData(X=union_mtx.copy(), obs=adata_st.obs.copy(), var=pd.DataFrame(index=hvgs_union))
+            new_adata.obsm.update(adata_st.obsm)
+            new_adata.layers["mask"] = mask
+            new_adata.obsm["count_union"] = union_mtx.copy()
+            new_adata.obsm["count"] = shared_mtx.copy()
+            st_library_size = np.sum(union_mtx, axis=1)
+            new_adata.obs["library_size"] = st_library_size
+            new_adata.uns["gene_index_union"] = np.array(hvgs_union)
+            new_adata.uns["gene_index_shared"] = np.array(shared_idx)
+            private_idx = [gene_to_union[g] for g in genes_in_slice if g not in hvgs_shared]
+            new_adata.uns["gene_index_private"] = np.array(private_idx)
+
+            sc.pp.normalize_total(new_adata, target_sum=target_sum)
+            sc.pp.log1p(new_adata)
+            if scipy.sparse.issparse(new_adata.X):
+                new_adata.X = new_adata.X.toarray()
+            adata_st_list[i] = new_adata
+        else:
+            # Store counts and library sizes for Poisson modeling
+            st_mtx = adata_st[:, hvgs_shared].X.copy()
+            if scipy.sparse.issparse(st_mtx):
+                st_mtx = st_mtx.toarray()
+            adata_st_list[i].obsm["count"] = st_mtx
+            st_library_size = np.sum(st_mtx, axis=1)
+            adata_st_list[i].obs["library_size"] = st_library_size
+            # Normalize data
+            sc.pp.normalize_total(adata_st_list[i], target_sum=target_sum)
+            sc.pp.log1p(adata_st_list[i])
+            adata_st_list[i] = adata_st_list[i][:, hvgs_shared]
+            if scipy.sparse.issparse(adata_st_list[i].X):
+                adata_st_list[i].X = adata_st_list[i].X.toarray()
 
     return adata_st_list, adata_full
 
@@ -112,6 +198,7 @@ def preprocess(adata_st_list, # list of spatial transcriptomics anndata objects
 def build_graph_GAT(adata_st_list, # list of spatial transcriptomics anndata objects after "preprocess" step
                     rad_cutoff=None, # radius for finding neighbors of spots/cells
                     rad_coef=None, # if rad_cutoff is not provided, we calculate mininal distance between spots/cells (min_dist_ref) and set rad_cutoff=rad_coef*min_dist_ref
+                    concat_mask_to_input=False, # whether concatenate measurement mask to input features
                    ):
     print("Start building graphs...")
     
@@ -136,7 +223,20 @@ def build_graph_GAT(adata_st_list, # list of spatial transcriptomics anndata obj
         adata_st_list[i].obsm["graph"] = G
         
         # Calculate cosine similarity of features among spots/cells
-        pair_dist_cos = pairwise_distances(adata_st.X, metric="cosine") # 1 - cosine_similarity
+        if concat_mask_to_input and "mask" in adata_st.layers.keys():
+            mask_layer = adata_st.layers["mask"]
+            if scipy.sparse.issparse(mask_layer):
+                mask_layer = mask_layer.toarray()
+            features = adata_st.X
+            if scipy.sparse.issparse(features):
+                features = features.toarray()
+            features_with_mask = np.concatenate([features, mask_layer], axis=1)
+            features_for_cosine = features_with_mask
+        else:
+            features_for_cosine = adata_st.X
+            if scipy.sparse.issparse(features_for_cosine):
+                features_for_cosine = features_for_cosine.toarray()
+        pair_dist_cos = pairwise_distances(features_for_cosine, metric="cosine") # 1 - cosine_similarity
         adata_st_list[i].obsm["graph_cos"] = 1 - pair_dist_cos
 
     return adata_st_list
@@ -146,6 +246,7 @@ def build_graph_GAT(adata_st_list, # list of spatial transcriptomics anndata obj
 def build_graph_LGCN(adata_st_list, # list of spatial transcriptomics anndata objects after "preprocess" step
                      rad_cutoff_list, # list of radius for finding neighbors of spots/cells
                      k_lgcn=1, # number of aggregation steps for constructing features for LGCN
+                     concat_mask_to_input=False, # whether concatenate measurement mask to input features
                     ):
     print("Start building graphs...")
 
@@ -175,6 +276,11 @@ def build_graph_LGCN(adata_st_list, # list of spatial transcriptomics anndata ob
             Xf = adata_st_list[i].X.toarray()
         else:
             Xf = adata_st_list[i].X
+        if concat_mask_to_input and "mask" in adata_st_list[i].layers.keys():
+            mask_layer = adata_st_list[i].layers["mask"]
+            if scipy.sparse.issparse(mask_layer):
+                mask_layer = mask_layer.toarray()
+            Xf = np.concatenate([Xf, mask_layer], axis=1)
         Xfs = [Xf]
         for j in range(k_lgcn):
             Xf = adjG @ Xfs[-1]
