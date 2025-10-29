@@ -257,6 +257,12 @@ class Model_LGCN():
                  lr_d=5e-4, # learning rate for training "DiscriminatorNet"
                  different_platforms=False, # whether integrate datasets across different platforms
                  seed=1234, # random seed
+                 use_gene_union=False, # whether enable gene union + dual decoder
+                 use_interpretable_ae=True, # whether use interpretable AE head
+                 lambda_ae=0.1, # coefficient for AE loss
+                 lambda_cons=0.1, # coefficient for consistency loss
+                 lambda_sparse=1e-4, # coefficient for sparsity on private loadings
+                 warmup_steps=1500, # warmup steps for AE-only optimization
                 ):
 
         # set hyperparameters
@@ -284,6 +290,13 @@ class Model_LGCN():
         self.lr_d = lr_d
         self.different_platforms = different_platforms
         self.seed = seed
+        self.use_gene_union = use_gene_union
+        self.use_interpretable_ae = use_interpretable_ae
+        self.lambda_ae = lambda_ae
+        self.lambda_cons = lambda_cons
+        self.lambda_sparse = lambda_sparse
+        self.warmup_steps = warmup_steps
+        self.lambda_ae_final = lambda_ae * 2.0
 
         self.margin_warmup_step = 100
         self.margin = 5.0
@@ -312,7 +325,60 @@ class Model_LGCN():
                                        slice_emb_dim=self.slice_emb_dim,
                                        different_platforms=self.different_platforms
                                       ).to(self.device)
-        self.optimizer_net = optim.Adamax(list(self.net.parameters()), lr=self.lr, weight_decay=self.weight_decay)
+
+        self.union_size = None
+        self.shared_idx = None
+        self.private_index_list = []
+        self.private_loadings = None
+        self.ae_heads = None
+        self.optimizer_ae = None
+        net_params = list(self.net.parameters())
+
+        if self.use_gene_union:
+            if "count_union" not in adata_st_list[0].obsm.keys():
+                raise ValueError("use_gene_union=True requires preprocess to generate 'count_union' in adata.obsm")
+            self.union_size = adata_st_list[0].obsm["count_union"].shape[1]
+            shared_idx = adata_st_list[0].uns.get("gene_index_shared")
+            if shared_idx is None:
+                shared_idx = np.arange(self.n_hvgs)
+            self.shared_idx = torch.tensor(shared_idx, dtype=torch.long)
+            for i in range(self.n_slices):
+                private_idx = adata_st_list[i].uns.get("gene_index_private")
+                if private_idx is None:
+                    private_idx = np.array([], dtype=int)
+                self.private_index_list.append(np.array(private_idx, dtype=int))
+
+            if self.use_interpretable_ae:
+                private_params = []
+                for private_idx in self.private_index_list:
+                    size = len(private_idx)
+                    if size > 0:
+                        param = nn.Parameter(torch.rand(size, self.n_spatial_factors))
+                    else:
+                        param = nn.Parameter(torch.zeros((0, self.n_spatial_factors)), requires_grad=False)
+                    private_params.append(param)
+                self.private_loadings = nn.ParameterList(private_params)
+                net_params = net_params + list(self.private_loadings)
+            else:
+                heads = []
+                for _ in range(self.n_slices):
+                    heads.append(nn.Sequential(
+                        nn.Linear(self.hidden_dims[1], self.hidden_dims[1]),
+                        nn.ReLU(),
+                        nn.Linear(self.hidden_dims[1], self.union_size)
+                    ))
+                self.ae_heads = nn.ModuleList(heads).to(self.device)
+                net_params = net_params + list(self.ae_heads.parameters())
+
+            ae_params = []
+            if self.use_interpretable_ae:
+                ae_params = [p for p in self.private_loadings if p.requires_grad]
+            else:
+                ae_params = list(self.ae_heads.parameters())
+            if len(ae_params) > 0:
+                self.optimizer_ae = optim.Adamax(ae_params, lr=self.lr, weight_decay=self.weight_decay)
+
+        self.optimizer_net = optim.Adamax(net_params, lr=self.lr, weight_decay=self.weight_decay)
 
         self.discriminator = {}
         d_params = []
@@ -331,21 +397,68 @@ class Model_LGCN():
         for i in range(self.n_slices-1):
             self.discriminator[i].train()
 
+        shared_idx_device = self.shared_idx.to(self.device) if self.use_gene_union and self.shared_idx is not None else None
+
         for step in tqdm(range(self.n_training_steps)):
             # sample minibatch and send data to device
             node_feats_dict = {}
             count_matrix_dict = {}
             library_size_dict = {}
             slice_label_dict = {}
+            union_count_dict = {}
+            mask_union_dict = {}
             for i in range(self.n_slices):
                 index_batch = np.random.choice(np.arange(self.n_spot_list[i]), size=self.batch_size)
                 node_feats_dict[i] = torch.from_numpy(adata_st_list[i].obsm["node_features"][index_batch, :]).float().to(self.device)
                 count_matrix_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obsm["count"][index_batch, :])).float().to(self.device)
                 library_size_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obs["library_size"].values.reshape(-1, 1))[index_batch, :]).float().to(self.device)
                 slice_label_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obs["slice"].values))[index_batch].long().to(self.device)
+                if self.use_gene_union:
+                    union_count_dict[i] = torch.from_numpy(np.array(adata_st_list[i].obsm["count_union"][index_batch, :])).float().to(self.device)
+                    if "mask" not in adata_st_list[i].layers.keys():
+                        raise ValueError("use_gene_union=True requires 'mask' stored in adata.layers")
+                    mask_union = adata_st_list[i].layers["mask"]
+                    if scipy.sparse.issparse(mask_union):
+                        mask_union = mask_union.toarray()
+                    mask_union_dict[i] = torch.from_numpy(np.array(mask_union[index_batch, :])).float().to(self.device)
 
             # outputs from networks
             Zs, betas, alphas, node_feats_recons, basis_val, gammas = self.net(node_feats_dict, slice_label_dict)
+
+            if self.use_gene_union and step < self.warmup_steps and self.optimizer_ae is not None:
+                self.optimizer_ae.zero_grad()
+                ae_loss_warmup = 0.
+                cons_loss_warmup = 0.
+                sparse_loss_warmup = 0.
+                for i in range(self.n_slices):
+                    mask_union = mask_union_dict[i]
+                    count_union = union_count_dict[i]
+                    log_rate_union = torch.zeros_like(count_union)
+                    log_lam_shared = torch.log(torch.matmul(betas[i].detach(), basis_val.detach()) + 1e-6) + gammas[slice_label_dict[i]].detach()
+                    log_rate_union[:, shared_idx_device] = torch.log(library_size_dict[i] + 1e-6) + log_lam_shared
+                    if self.use_interpretable_ae:
+                        private_idx = self.private_index_list[i]
+                        if len(private_idx) > 0:
+                            private_param = self.private_loadings[i]
+                            if private_param.requires_grad:
+                                private_idx_tensor = torch.tensor(private_idx, dtype=torch.long, device=self.device)
+                                private_rate = torch.matmul(betas[i].detach(), F.softplus(private_param).T)
+                                log_rate_union[:, private_idx_tensor] = torch.log(library_size_dict[i] + 1e-6) + torch.log(private_rate + 1e-6)
+                                sparse_loss_warmup = sparse_loss_warmup + torch.sum(torch.abs(private_param))
+                    else:
+                        pred_rate = F.softplus(self.ae_heads[i](Zs[i].detach()))
+                        log_rate_union = torch.log(library_size_dict[i] + 1e-6) + torch.log(pred_rate + 1e-6)
+                    rate_union = torch.exp(log_rate_union)
+                    ae_loss_warmup = ae_loss_warmup + torch.sum(mask_union * (rate_union - count_union * log_rate_union))
+                    ae_shared = rate_union[:, shared_idx_device]
+                    nmf_shared = torch.exp(torch.log(library_size_dict[i] + 1e-6) + log_lam_shared)
+                    cons_loss_warmup = cons_loss_warmup + torch.sum(torch.abs(ae_shared - nmf_shared))
+                warmup_loss = self.lambda_ae * ae_loss_warmup + self.lambda_cons * cons_loss_warmup + self.lambda_sparse * sparse_loss_warmup
+                warmup_loss.backward()
+                self.optimizer_ae.step()
+                if not step % self.step_interval:
+                    print("Warmup Step: %s, ae_loss: %.4f, cons_loss: %.4f, spr_loss: %.4f" % (step, ae_loss_warmup.item(), cons_loss_warmup.item(), sparse_loss_warmup.item()))
+                continue
 
             # discriminator loss
             self.optimizer_d.zero_grad()
@@ -369,14 +482,39 @@ class Model_LGCN():
             log_lam_dict = {}
             Zs_norm_dict = {}
             Xs_norm_dict = {}
+            ae_loss = 0.
+            cons_loss = 0.
+            sparse_loss = 0.
             for i in range(self.n_slices):
                 features_loss = features_loss + torch.mean(torch.sqrt(torch.sum(torch.pow(node_feats_dict[i][:,:self.n_hvgs]-node_feats_recons[i], 2), axis=1)))
                 log_lam_dict[i] = torch.log(torch.matmul(betas[i], basis_val) + 1e-6) + gammas[slice_label_dict[i]]
-                recon_loss = recon_loss - torch.mean(torch.sum(count_matrix_dict[i] * 
+                recon_loss = recon_loss - torch.mean(torch.sum(count_matrix_dict[i] *
                                                          (torch.log(library_size_dict[i] + 1e-6) + log_lam_dict[i]) - library_size_dict[i] * torch.exp(log_lam_dict[i]), axis=1))
                 Zs_norm_dict[i] = F.normalize(Zs[i], p=2)
                 Xs_norm_dict[i] = F.normalize(node_feats_dict[i][:,:self.n_hvgs], p=2)
                 geom_loss = geom_loss + torch.mean(torch.sum(torch.pow(torch.matmul(Zs_norm_dict[i],torch.transpose(Zs_norm_dict[i],0,1)) - torch.matmul(Xs_norm_dict[i],torch.transpose(Xs_norm_dict[i],0,1)), 2), axis=1))
+                if self.use_gene_union:
+                    mask_union = mask_union_dict[i]
+                    count_union = union_count_dict[i]
+                    log_rate_union = torch.zeros_like(count_union)
+                    log_rate_union[:, shared_idx_device] = torch.log(library_size_dict[i] + 1e-6) + log_lam_dict[i]
+                    if self.use_interpretable_ae:
+                        private_idx = self.private_index_list[i]
+                        if len(private_idx) > 0:
+                            private_param = self.private_loadings[i]
+                            private_idx_tensor = torch.tensor(private_idx, dtype=torch.long, device=self.device)
+                            private_rate = torch.matmul(betas[i], F.softplus(private_param).T)
+                            log_rate_union[:, private_idx_tensor] = torch.log(library_size_dict[i] + 1e-6) + torch.log(private_rate + 1e-6)
+                            if private_param.requires_grad:
+                                sparse_loss = sparse_loss + torch.sum(torch.abs(private_param))
+                    else:
+                        pred_rate = F.softplus(self.ae_heads[i](Zs[i]))
+                        log_rate_union = torch.log(library_size_dict[i] + 1e-6) + torch.log(pred_rate + 1e-6)
+                    rate_union = torch.exp(log_rate_union)
+                    ae_loss = ae_loss + torch.sum(mask_union * (rate_union - count_union * log_rate_union))
+                    ae_shared = rate_union[:, shared_idx_device]
+                    nmf_shared = torch.exp(torch.log(library_size_dict[i] + 1e-6) + log_lam_dict[i])
+                    cons_loss = cons_loss + torch.sum(torch.abs(ae_shared - nmf_shared))
 
             # beta loss
             for i in range(self.n_slices):
@@ -401,12 +539,26 @@ class Model_LGCN():
 
             # total loss
             self.optimizer_net.zero_grad()
+            lambda_ae_cur = self.lambda_ae
+            if self.use_gene_union:
+                if self.n_training_steps > self.warmup_steps:
+                    progress = max(0, step - self.warmup_steps) / max(1, self.n_training_steps - self.warmup_steps)
+                else:
+                    progress = 1.0
+                lambda_ae_cur = self.lambda_ae + (self.lambda_ae_final - self.lambda_ae) * min(1.0, max(0.0, progress))
             loss_total = self.coef_fe*features_loss + self.coef_recon*recon_loss + self.coef_geom*geom_loss + self.coef_beta*beta_loss + self.coef_gan*gan_loss
+            if self.use_gene_union:
+                loss_total = loss_total + lambda_ae_cur*ae_loss + self.lambda_cons*cons_loss + self.lambda_sparse*sparse_loss
             loss_total.backward()
             self.optimizer_net.step()
 
             if not step % self.step_interval:
-                print("Step: %s, d_loss: %.4f, Loss: %.4f, recon_loss: %.4f, fe_loss: %.4f, geom_loss: %.4f, beta_loss: %.4f, gan_loss: %.4f" % (step, loss_d.item(), loss_total.item(), recon_loss.item(), features_loss.item(), geom_loss.item(), beta_loss.item(), gan_loss.item()))
+                if self.use_gene_union:
+                    print("Step: %s, d_loss: %.4f, Loss: %.4f, recon_loss: %.4f, fe_loss: %.4f, geom_loss: %.4f, beta_loss: %.4f, gan_loss: %.4f, ae_loss: %.4f, cons_loss: %.4f, spr_loss: %.4f" % (
+                        step, loss_d.item(), loss_total.item(), recon_loss.item(), features_loss.item(), geom_loss.item(), beta_loss.item(), gan_loss.item(),
+                        ae_loss.item(), cons_loss.item(), sparse_loss.item()))
+                else:
+                    print("Step: %s, d_loss: %.4f, Loss: %.4f, recon_loss: %.4f, fe_loss: %.4f, geom_loss: %.4f, beta_loss: %.4f, gan_loss: %.4f" % (step, loss_d.item(), loss_total.item(), recon_loss.item(), features_loss.item(), geom_loss.item(), beta_loss.item(), gan_loss.item()))
 
 
     def eval(self,
